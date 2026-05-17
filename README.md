@@ -263,6 +263,3 @@ The client is a single-file React SPA (`client/index.html`) with no build step. 
 
 To point it at a different API, update the `API_BASE` constant near the top of `index.html`:
 
-```js
-const API_BASE = 'https://<your-api-id>.execute-api.us-east-1.amazonaws.com/prod';
-```
