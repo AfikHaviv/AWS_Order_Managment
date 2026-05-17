@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASN · Orders</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { font-family: 'Inter Tight', system-ui, sans-serif; background: #06080d; }
+  #root { width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+// ─── API ────────────────────────────────────────────────────────────────────
+const API_BASE = 'https://dapejgoi60.execute-api.us-east-1.amazonaws.com/prod';
+
+// ─── Store ───────────────────────────────────────────────────────────────────
+const ordersStore = {
+  orders: null, loading: false, error: null,
+  _listeners: new Set(), _loadPromise: null,
+  subscribe(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); },
+  _notify() { this._listeners.forEach(fn => fn()); },
+  async load(force = false) {
+    if (this._loadPromise && !force) return this._loadPromise;
+    this.loading = true; this.error = null; this._notify();
+    this._loadPromise = (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/orders`);
+        if (!r.ok) throw new Error('Failed to load orders');
+        this.orders = await r.json();
+      } catch(e) {
+        this.error = e.message || 'Network error';
+        this.orders = this.orders || [];
+      }
+      this.loading = false; this._notify();
+    })();
+    const p = this._loadPromise;
+    p.finally(() => { this._loadPromise = null; });
+    return p;
+  },
+  async create({ description, price }) {
+    const r = await fetch(`${API_BASE}/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description, price: parseFloat(price) }),
+    });
+    if (!r.ok) throw new Error('Create failed');
+    await this.load(true);
+  },
+  async update(id, { description, price }) {
+    const r = await fetch(`${API_BASE}/orders/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description, price: parseFloat(price) }),
+    });
+    if (!r.ok) throw new Error('Update failed');
+    await this.load(true);
+  },
+  async remove(id) {
+    const r = await fetch(`${API_BASE}/orders/${id}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error('Delete failed');
+    await this.load(true);
+  },
+  async subscribeEmail(email) {
+    const r = await fetch(`${API_BASE}/notifications/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    if (!r.ok) throw new Error('Subscription failed');
+  },
+  async unsubscribeEmail(email) {
+    const r = await fetch(`${API_BASE}/notifications/unsubscribe`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'Unsubscribe failed');
+  },
+  async generatePDF() {
+    const r = await fetch(`${API_BASE}/orders/summary/pdf`);
+    const d = await r.json();
+    if (!r.ok) throw new Error('PDF generation failed');
+    return d;
+  },
+  async exportCSV() {
+    const r = await fetch(`${API_BASE}/orders/export`);
+    const d = await r.json();
+    if (!r.ok) throw new Error('CSV export failed');
+    return d;
+  },
+};
+
+function useOrdersStore() {
+  const [, force] = useState(0);
+  useEffect(() => ordersStore.subscribe(() => force(t => t + 1)), []);
+  useEffect(() => { if (ordersStore.orders === null && !ordersStore.loading) ordersStore.load(); }, []);
+  return ordersStore;
+}
+
+function useToast() {
+  const [msg, setMsg] = useState(null);
+  const timer = useRef(null);
+  const show = useCallback((text, kind = 'ok') => {
+    if (timer.current) clearTimeout(timer.current);
+    setMsg({ text, kind, id: Date.now() });
+    timer.current = setTimeout(() => setMsg(null), 3200);
+  }, []);
+  return [msg, show];
+}
+
+const fmtMoney = n => '$' + (parseFloat(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtDate  = s => { if (!s) return '—'; const d = new Date(s); return isNaN(d) ? s.slice(0,10) : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+const fmtTime  = s => { if (!s) return ''; const d = new Date(s); return isNaN(d) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); };
+const shortId  = id => (id || '').slice(0, 8);
+
+// ─── CSS ─────────────────────────────────────────────────────────────────────
+const slateCSS = `
+.sl-root {
+  --sl-bg:          #f5f6f8;
+  --sl-bg2:         #ecedf0;
+  --sl-panel:       rgba(255,255,255,0.72);
+  --sl-panel-solid: #ffffff;
+  --sl-ink:         #0e1320;
+  --sl-mute:        #5a6478;
+  --sl-faint:       #97a0b3;
+  --sl-line:        rgba(14,19,32,0.08);
+  --sl-line-strong: rgba(14,19,32,0.18);
+  --sl-accent:      #00b08c;
+  --sl-accent-fg:   #ffffff;
+  --sl-accent-soft: rgba(0,176,140,0.12);
+  --sl-warn:        #d9442a;
+  --sl-glow: radial-gradient(circle at 30% 0%,rgba(0,176,140,.10) 0%,transparent 55%),
+             radial-gradient(circle at 100% 80%,rgba(98,113,228,.10) 0%,transparent 55%);
+  font-family:'Inter Tight','Geist',system-ui,sans-serif;
+  background: var(--sl-bg); background-image: var(--sl-glow);
+  color: var(--sl-ink);
+  width:100%; min-height:100vh;
+  display:flex; flex-direction:column;
+  font-size:13.5px; letter-spacing:-0.005em;
+}
+.sl-root.dark {
+  --sl-bg:          #06080d;
+  --sl-bg2:         #0c1019;
+  --sl-panel:       rgba(20,25,38,0.6);
+  --sl-panel-solid: #141927;
+  --sl-ink:         #eef2fa;
+  --sl-mute:        #8b94ab;
+  --sl-faint:       #4d5571;
+  --sl-line:        rgba(255,255,255,0.07);
+  --sl-line-strong: rgba(255,255,255,0.14);
+  --sl-accent:      #4be1b8;
+  --sl-accent-fg:   #042418;
+  --sl-accent-soft: rgba(75,225,184,0.14);
+  --sl-glow: radial-gradient(circle at 25% 0%,rgba(75,225,184,.13) 0%,transparent 55%),
+             radial-gradient(circle at 100% 70%,rgba(120,140,255,.13) 0%,transparent 55%);
+}
+.sl-topbar {
+  padding:14px 24px; display:flex; align-items:center; gap:14px;
+  border-bottom:1px solid var(--sl-line);
+  backdrop-filter:blur(14px); position:sticky; top:0; z-index:10;
+}
+.sl-logo {
+  width:32px; height:32px; border-radius:9px; flex-shrink:0;
+  background:linear-gradient(135deg,var(--sl-accent) 0%,#6280f0 100%);
+  display:grid; place-items:center; color:var(--sl-accent-fg);
+  font-weight:700; font-size:11px; letter-spacing:0.04em;
+  box-shadow:0 4px 14px rgba(0,176,140,0.28);
+}
+.sl-root.dark .sl-logo { box-shadow:0 0 0 1px rgba(75,225,184,0.3),0 6px 20px rgba(75,225,184,0.2); }
+.sl-brand { display:flex; align-items:baseline; gap:8px; }
+.sl-brand .name { font-size:14px; font-weight:600; letter-spacing:-0.01em; }
+.sl-brand .sub  { font-size:11px; color:var(--sl-mute); }
+.sl-pill {
+  margin-left:auto; display:inline-flex; align-items:center; gap:7px;
+  padding:5px 11px; border-radius:999px; background:var(--sl-accent-soft);
+  color:var(--sl-accent); font-size:11px; font-weight:500;
+  border:1px solid color-mix(in oklab,var(--sl-accent) 30%,transparent);
+}
+.sl-pill .dot { width:6px; height:6px; border-radius:50%; background:var(--sl-accent); box-shadow:0 0 8px var(--sl-accent); }
+.sl-theme-btn {
+  margin-left:10px; background:var(--sl-panel-solid); border:1px solid var(--sl-line-strong);
+  color:var(--sl-mute); border-radius:8px; padding:5px 10px; cursor:pointer;
+  font:inherit; font-size:12px; transition:all .12s;
+}
+.sl-theme-btn:hover { color:var(--sl-ink); }
+.sl-tabs {
+  padding:0 24px; display:flex; gap:2px; border-bottom:1px solid var(--sl-line);
+  position:sticky; top:61px; z-index:9; background:var(--sl-bg);
+}
+.sl-tab {
+  padding:11px 14px; cursor:pointer; font-size:12.5px; color:var(--sl-mute);
+  font-weight:500; position:relative; transition:color .15s;
+  display:flex; align-items:center; gap:8px; white-space:nowrap;
+}
+.sl-tab:hover { color:var(--sl-ink); }
+.sl-tab.active { color:var(--sl-ink); }
+.sl-tab.active::after {
+  content:''; position:absolute; left:14px; right:14px; bottom:-1px;
+  height:2px; background:var(--sl-accent); border-radius:2px 2px 0 0;
+  box-shadow:0 0 8px var(--sl-accent);
+}
+.sl-tab .badge {
+  font-size:10px; padding:1px 7px; border-radius:8px;
+  background:var(--sl-bg2); color:var(--sl-mute); font-weight:600;
+}
+.sl-tab.active .badge { background:var(--sl-accent-soft); color:var(--sl-accent); }
+.sl-content { flex:1; padding:22px 24px 48px; max-width:1100px; width:100%; margin:0 auto; }
+.sl-bento {
+  display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:12px; margin-bottom:18px;
+}
+@media(max-width:780px) { .sl-bento { grid-template-columns:1fr 1fr; } }
+.sl-tile {
+  background:var(--sl-panel); border:1px solid var(--sl-line); border-radius:14px;
+  padding:18px 20px; backdrop-filter:blur(12px); position:relative; overflow:hidden;
+}
+.sl-tile .k  { font-size:11px; color:var(--sl-mute); letter-spacing:0.02em; }
+.sl-tile .v  { font-size:28px; font-weight:600; letter-spacing:-0.025em; margin-top:8px; line-height:1; }
+.sl-tile .v.accent { color:var(--sl-accent); }
+.sl-tile.big .v { font-size:36px; }
+.sl-tile .delta { font-size:11px; color:var(--sl-mute); margin-top:6px; display:flex; align-items:center; gap:6px; }
+.sl-tile .delta b { color:var(--sl-accent); font-weight:500; }
+.sl-spark { position:absolute; right:16px; bottom:14px; opacity:0.55; color:var(--sl-accent); }
+.sl-panel {
+  background:var(--sl-panel); border:1px solid var(--sl-line); border-radius:14px;
+  overflow:hidden; backdrop-filter:blur(12px); margin-bottom:14px;
+}
+.sl-panel-head {
+  padding:13px 18px; display:flex; align-items:center; gap:10px;
+  border-bottom:1px solid var(--sl-line); flex-wrap:wrap;
+}
+.sl-panel-head h2  { font-size:14px; font-weight:600; letter-spacing:-0.005em; }
+.sl-panel-head .desc { font-size:11.5px; color:var(--sl-mute); }
+.sl-panel-head .filler { flex:1; }
+.sl-table { width:100%; border-collapse:collapse; }
+.sl-table th {
+  text-align:left; padding:10px 18px; font-size:11px; color:var(--sl-mute);
+  font-weight:500; letter-spacing:0.02em; border-bottom:1px solid var(--sl-line);
+}
+.sl-table th.num { text-align:right; }
+.sl-table td { padding:13px 18px; border-bottom:1px solid var(--sl-line); font-size:13px; vertical-align:middle; }
+.sl-table td.num { text-align:right; font-feature-settings:"tnum" on; }
+.sl-table tbody tr:hover td { background:color-mix(in oklab,var(--sl-accent) 5%,transparent); }
+.sl-table tbody tr:last-child td { border-bottom:0; }
+.sl-id { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--sl-mute); padding:2px 6px; background:var(--sl-bg2); border-radius:5px; letter-spacing:0.04em; }
+.sl-desc   { font-weight:500; }
+.sl-money  { font-weight:600; letter-spacing:-0.015em; }
+.sl-date   { color:var(--sl-mute); font-size:12px; }
+.sl-date .time { color:var(--sl-faint); margin-left:4px; font-size:11px; }
+.sl-btn {
+  border:1px solid var(--sl-line-strong); background:var(--sl-panel-solid); color:var(--sl-ink);
+  border-radius:8px; padding:7px 12px; cursor:pointer; font:inherit;
+  font-size:12.5px; font-weight:500; transition:all .12s;
+  display:inline-flex; align-items:center; gap:6px;
+}
+.sl-btn:hover { background:var(--sl-bg2); border-color:var(--sl-mute); }
+.sl-btn.primary {
+  background:var(--sl-accent); color:var(--sl-accent-fg); border-color:transparent;
+  box-shadow:0 4px 14px color-mix(in oklab,var(--sl-accent) 35%,transparent);
+}
+.sl-btn.primary:hover { filter:brightness(1.05); }
+.sl-btn.ghost  { background:transparent; border-color:transparent; color:var(--sl-mute); }
+.sl-btn.ghost:hover { background:var(--sl-bg2); color:var(--sl-ink); }
+.sl-btn.danger { color:var(--sl-warn); }
+.sl-btn.danger:hover { background:color-mix(in oklab,var(--sl-warn) 12%,transparent); border-color:var(--sl-warn); }
+.sl-btn.icon   { padding:6px 9px; }
+.sl-btn:disabled { opacity:0.5; cursor:not-allowed; }
+.sl-row-actions { display:flex; gap:4px; justify-content:flex-end; }
+.sl-empty { padding:64px 20px; text-align:center; color:var(--sl-mute); }
+.sl-empty .glyph { width:60px; height:60px; border-radius:18px; background:var(--sl-accent-soft); display:grid; place-items:center; margin:0 auto 14px; color:var(--sl-accent); font-size:26px; }
+.sl-empty .msg   { font-size:14px; }
+.sl-loading { padding:50px 20px; text-align:center; color:var(--sl-mute); font-size:13px; }
+.sl-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+@media(max-width:640px) { .sl-grid-2 { grid-template-columns:1fr; } }
+.sl-form  { padding:22px; display:grid; gap:14px; }
+.sl-field { display:grid; gap:6px; }
+.sl-field label { font-size:11.5px; font-weight:500; color:var(--sl-mute); }
+.sl-field input, .sl-field input[type="email"] {
+  background:var(--sl-panel-solid); border:1px solid var(--sl-line-strong); border-radius:9px;
+  padding:10px 14px; font:inherit; font-size:14px; color:var(--sl-ink); transition:all .12s; width:100%;
+}
+.sl-field input:focus { outline:none; border-color:var(--sl-accent); box-shadow:0 0 0 3px var(--sl-accent-soft); }
+.sl-field .hint { font-size:11.5px; color:var(--sl-mute); }
+.sl-modal-bg {
+  position:fixed; inset:0; background:rgba(6,8,13,0.55);
+  backdrop-filter:blur(10px); display:grid; place-items:center; z-index:50; padding:24px;
+}
+.sl-modal {
+  background:var(--sl-panel-solid); border:1px solid var(--sl-line-strong); border-radius:16px;
+  width:460px; max-width:100%; box-shadow:0 24px 60px rgba(0,0,0,0.4); overflow:hidden;
+}
+.sl-modal-head { padding:18px 22px; border-bottom:1px solid var(--sl-line); }
+.sl-modal-head h3 { font-size:16px; font-weight:600; letter-spacing:-0.01em; }
+.sl-modal-head .sub { font-size:11.5px; color:var(--sl-mute); margin-top:2px; font-family:'JetBrains Mono',monospace; }
+.sl-modal-foot { padding:14px 22px; border-top:1px solid var(--sl-line); display:flex; gap:8px; justify-content:flex-end; }
+.sl-toast {
+  position:fixed; top:18px; right:22px; z-index:100;
+  padding:10px 16px; background:var(--sl-panel-solid); color:var(--sl-ink);
+  border:1px solid var(--sl-line-strong); border-radius:10px;
+  box-shadow:0 12px 30px rgba(0,0,0,0.2);
+  font-size:12.5px; display:flex; align-items:center; gap:8px;
+  animation: toastIn .18s ease;
+}
+@keyframes toastIn { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }
+.sl-toast .glyph { width:18px; height:18px; border-radius:50%; background:var(--sl-accent); color:var(--sl-accent-fg); display:grid; place-items:center; font-size:11px; font-weight:700; flex-shrink:0; }
+.sl-toast.err .glyph { background:var(--sl-warn); color:#fff; }
+.sl-report-card { padding:22px; }
+.sl-report-card h3 { font-size:18px; font-weight:600; letter-spacing:-0.015em; }
+.sl-report-card p  { font-size:13px; color:var(--sl-mute); margin-top:6px; line-height:1.55; max-width:340px; }
+.sl-link {
+  display:inline-flex; align-items:center; gap:8px; padding:9px 14px; margin-top:14px;
+  background:var(--sl-accent-soft); color:var(--sl-accent); border-radius:9px;
+  border:1px solid color-mix(in oklab,var(--sl-accent) 28%,transparent);
+  text-decoration:none; font-size:12.5px; font-weight:500;
+}
+.sl-link:hover { background:color-mix(in oklab,var(--sl-accent) 22%,transparent); }
+.sl-link .meta { color:var(--sl-mute); font-weight:400; margin-left:auto; padding-left:12px; }
+.sl-meta-strip {
+  padding:10px 18px; border-top:1px solid var(--sl-line);
+  display:flex; align-items:center; gap:16px; font-size:11.5px; color:var(--sl-mute); flex-wrap:wrap;
+}
+.sl-meta-strip .sep { color:var(--sl-faint); }
+`;
+
+// ─── Spark ───────────────────────────────────────────────────────────────────
+function SlateSpark() {
+  const hs = [12,18,9,22,16,30,24,20,28,15,32,22,26,30,18,24,33,28,22,20];
+  return (
+    <svg className="sl-spark" width="120" height="36" viewBox="0 0 120 36" fill="none">
+      <defs>
+        <linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor="currentColor" stopOpacity="0.7"/>
+          <stop offset="100%" stopColor="currentColor" stopOpacity="0.15"/>
+        </linearGradient>
+      </defs>
+      {hs.map((h,i) => <rect key={i} x={i*6} y={36-h} width="3.5" height={h} rx="1.5" fill="url(#sg)"/>)}
+    </svg>
+  );
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
+function App() {
+  const [dark, setDark] = useState(true);
+  const store = useOrdersStore();
+  const [tab, setTab]   = useState('orders');
+  const [toast, showToast] = useToast();
+  const orders = store.orders || [];
+  const total  = useMemo(() => orders.reduce((s,o) => s + (parseFloat(o.price)||0), 0), [orders]);
+  const avg    = orders.length ? total / orders.length : 0;
+  const last24 = useMemo(() => {
+    const c = Date.now() - 86400000;
+    return orders.filter(o => new Date(o.creation_date).getTime() > c).length;
+  }, [orders]);
+
+  return (
+    <div className={'sl-root' + (dark ? ' dark' : '')}>
+      <style>{slateCSS}</style>
+
+      {/* Top bar */}
+      <div className="sl-topbar">
+        <div className="sl-logo"><span>ASN</span></div>
+        <div className="sl-brand">
+          <span className="name">ASN <span style={{color:'var(--sl-mute)',fontWeight:400}}>·</span> Orders</span>
+          <span className="sub">workspace · prod</span>
+        </div>
+        <span className="sl-pill"><span className="dot"></span> Live</span>
+        <button className="sl-theme-btn" onClick={() => setDark(d => !d)}>
+          {dark ? '☀ Light' : '☾ Dark'}
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div className="sl-tabs">
+        <Tab id="orders" tab={tab} setTab={setTab} badge={orders.length}>Overview</Tab>
+        <Tab id="create" tab={tab} setTab={setTab}>New order</Tab>
+        <Tab id="notify" tab={tab} setTab={setTab}>Notifications</Tab>
+        <Tab id="reports" tab={tab} setTab={setTab}>Reports</Tab>
+      </div>
+
+      {/* Content */}
+      <div className="sl-content">
+        {tab === 'orders'  && <Orders  store={store} orders={orders} total={total} avg={avg} last24={last24} showToast={showToast} />}
+        {tab === 'create'  && <Create  store={store} showToast={showToast} onDone={() => setTab('orders')} />}
+        {tab === 'notify'  && <Notify  store={store} showToast={showToast} />}
+        {tab === 'reports' && <Reports store={store} showToast={showToast} />}
+      </div>
+
+      {/* Toast */}
+      {toast && (
+        <div className={'sl-toast' + (toast.kind === 'err' ? ' err' : '')} key={toast.id}>
+          <span className="glyph">{toast.kind === 'err' ? '!' : '✓'}</span>
+          {toast.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Tab({ id, tab, setTab, badge, children }) {
+  return (
+    <div className={'sl-tab' + (tab === id ? ' active' : '')} onClick={() => setTab(id)}>
+      {children}
+      {badge != null && <span className="badge">{badge}</span>}
+    </div>
+  );
+}
+
+// ─── Orders ──────────────────────────────────────────────────────────────────
+function Orders({ store, orders, total, avg, last24, showToast }) {
+  const [editing, setEditing] = useState(null);
+
+  return (
+    <>
+      {/* Bento stats */}
+      <div className="sl-bento">
+        <div className="sl-tile big" style={{color:'var(--sl-accent)'}}>
+          <div className="k" style={{color:'var(--sl-mute)'}}>Total value</div>
+          <div className="v accent">{fmtMoney(total)}</div>
+          <div className="delta"><b>+{last24}</b> orders / 24 h</div>
+          <SlateSpark />
+        </div>
+        <div className="sl-tile">
+          <div className="k">Total orders</div>
+          <div className="v">{store.loading && !store.orders ? '—' : orders.length}</div>
+          <div className="delta">all-time</div>
+        </div>
+        <div className="sl-tile">
+          <div className="k">Avg ticket</div>
+          <div className="v">{orders.length ? fmtMoney(avg) : '—'}</div>
+          <div className="delta">per order</div>
+        </div>
+        <div className="sl-tile">
+          <div className="k">API status</div>
+          <div className="v" style={{display:'flex',alignItems:'center',gap:8,fontSize:18}}>
+            <span style={{width:10,height:10,borderRadius:'50%',background:'var(--sl-accent)',boxShadow:'0 0 10px var(--sl-accent)',flexShrink:0}}></span>
+            Healthy
+          </div>
+          <div className="delta">us-east-1</div>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="sl-panel">
+        <div className="sl-panel-head">
+          <h2>Orders</h2>
+          <span className="desc">live · DynamoDB</span>
+          <span className="filler"></span>
+          <button className="sl-btn ghost" onClick={() => store.load(true)}>↻ Refresh</button>
+        </div>
+        <table className="sl-table">
+          <thead>
+            <tr>
+              <th style={{width:100}}>ID</th>
+              <th>Description</th>
+              <th className="num" style={{width:130}}>Price</th>
+              <th style={{width:140}}>Created</th>
+              <th style={{width:140}}>Modified</th>
+              <th style={{width:110}}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {store.loading && !store.orders && (
+              <tr><td colSpan="6" className="sl-loading">Loading…</td></tr>
+            )}
+            {!store.loading && store.error && (
+              <tr><td colSpan="6" className="sl-loading" style={{color:'var(--sl-warn)'}}>{store.error}</td></tr>
+            )}
+            {!store.loading && store.orders && orders.length === 0 && (
+              <tr><td colSpan="6" style={{padding:0}}>
+                <div className="sl-empty">
+                  <div className="glyph">＋</div>
+                  <div className="msg">No orders yet. Create one to get started.</div>
+                </div>
+              </td></tr>
+            )}
+            {orders.map(o => (
+              <tr key={o.order_id}>
+                <td><span className="sl-id">{shortId(o.order_id)}</span></td>
+                <td className="sl-desc">{o.description}</td>
+                <td className="num sl-money">{fmtMoney(o.price)}</td>
+                <td className="sl-date">{fmtDate(o.creation_date)}<span className="time">{fmtTime(o.creation_date)}</span></td>
+                <td className="sl-date">{fmtDate(o.last_modified)}<span className="time">{fmtTime(o.last_modified)}</span></td>
+                <td>
+                  <div className="sl-row-actions">
+                    <button className="sl-btn icon" onClick={() => setEditing(o)} title="Edit">✎</button>
+                    <button className="sl-btn icon danger" title="Delete" onClick={async () => {
+                      if (!confirm(`Delete "${o.description}"?\nSubscribers will be notified by email.`)) return;
+                      try { await store.remove(o.order_id); showToast('Deleted · email dispatched'); }
+                      catch(e) { showToast(e.message, 'err'); }
+                    }}>✕</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="sl-meta-strip">
+          <span>n = {orders.length}</span>
+          <span className="sep">·</span>
+          <span>{fmtMoney(total)} total</span>
+          <span className="sep">·</span>
+          <span>region us-east-1</span>
+          <span style={{marginLeft:'auto'}}>sorted by creation date</span>
+        </div>
+      </div>
+
+      {editing && (
+        <EditModal
+          order={editing}
+          onClose={() => setEditing(null)}
+          onSave={async data => {
+            try { await store.update(editing.order_id, data); setEditing(null); showToast('Order updated'); }
+            catch(e) { showToast(e.message, 'err'); }
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+// ─── Create ──────────────────────────────────────────────────────────────────
+function Create({ store, showToast, onDone }) {
+  const [desc, setDesc]   = useState('');
+  const [price, setPrice] = useState('');
+  const [busy, setBusy]   = useState(false);
+  return (
+    <div className="sl-panel" style={{maxWidth:520}}>
+      <div className="sl-panel-head"><h2>New order</h2><span className="desc">POST · /orders</span></div>
+      <div className="sl-form">
+        <div className="sl-field">
+          <label>Description</label>
+          <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="e.g. Walnut writing desk" />
+          <div className="hint">Short label that identifies the order.</div>
+        </div>
+        <div className="sl-field">
+          <label>Price · USD</label>
+          <input type="number" step="0.01" min="0" value={price} onChange={e => setPrice(e.target.value)} placeholder="250.00" />
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button className="sl-btn ghost" onClick={() => { setDesc(''); setPrice(''); }}>Clear</button>
+          <button className="sl-btn primary" disabled={busy} onClick={async () => {
+            if (!desc.trim() || !price) return showToast('Both fields required', 'err');
+            setBusy(true);
+            try { await store.create({ description: desc.trim(), price }); showToast('Order created'); setDesc(''); setPrice(''); onDone && onDone(); }
+            catch(e) { showToast(e.message, 'err'); }
+            finally { setBusy(false); }
+          }}>{busy ? 'Creating…' : 'Create order'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Notify ──────────────────────────────────────────────────────────────────
+function Notify({ store, showToast }) {
+  const [subE, setSubE]     = useState('');
+  const [unsubE, setUnsubE] = useState('');
+  const [busy, setBusy]     = useState(false);
+  return (
+    <div className="sl-grid-2" style={{maxWidth:800}}>
+      <div className="sl-panel">
+        <div className="sl-panel-head"><h2>Subscribe</h2><span className="desc">SNS · email</span></div>
+        <div className="sl-form">
+          <div className="sl-field">
+            <label>Email address</label>
+            <input type="email" value={subE} onChange={e => setSubE(e.target.value)} placeholder="you@example.com" />
+            <div className="hint">A confirmation link will be sent. Click it to activate.</div>
+          </div>
+          <button className="sl-btn primary" style={{alignSelf:'flex-start'}} disabled={busy} onClick={async () => {
+            if (!subE.trim()) return showToast('Email required', 'err');
+            setBusy(true);
+            try { await store.subscribeEmail(subE.trim()); showToast('Confirmation sent · check your inbox'); setSubE(''); }
+            catch(e) { showToast(e.message, 'err'); }
+            finally { setBusy(false); }
+          }}>Subscribe</button>
+        </div>
+      </div>
+      <div className="sl-panel">
+        <div className="sl-panel-head"><h2>Unsubscribe</h2><span className="desc">DELETE</span></div>
+        <div className="sl-form">
+          <div className="sl-field">
+            <label>Email address</label>
+            <input type="email" value={unsubE} onChange={e => setUnsubE(e.target.value)} placeholder="you@example.com" />
+          </div>
+          <button className="sl-btn" style={{alignSelf:'flex-start'}} disabled={busy} onClick={async () => {
+            if (!unsubE.trim()) return showToast('Email required', 'err');
+            setBusy(true);
+            try { await store.unsubscribeEmail(unsubE.trim()); showToast('Removed successfully'); setUnsubE(''); }
+            catch(e) { showToast(e.message, 'err'); }
+            finally { setBusy(false); }
+          }}>Unsubscribe</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Reports ─────────────────────────────────────────────────────────────────
+function Reports({ store, showToast }) {
+  const [pdf, setPdf] = useState(null);
+  const [csv, setCsv] = useState(null);
+  const [busy, setBusy] = useState(null);
+  return (
+    <div className="sl-grid-2" style={{maxWidth:800}}>
+      <div className="sl-panel">
+        <div className="sl-panel-head"><h2>PDF summary</h2><span className="desc">GET · /orders/summary/pdf</span></div>
+        <div className="sl-report-card">
+          <h3>Deleted orders</h3>
+          <p>Generate a printable PDF of every order that has been removed. The signed S3 URL expires in 60 minutes.</p>
+          <button className="sl-btn primary" style={{marginTop:14}} disabled={busy === 'pdf'} onClick={async () => {
+            setBusy('pdf');
+            try { const d = await store.generatePDF(); setPdf(d); showToast('PDF ready'); }
+            catch(e) { showToast(e.message, 'err'); }
+            finally { setBusy(null); }
+          }}>{busy === 'pdf' ? 'Generating…' : 'Generate PDF'}</button>
+          {pdf && (
+            <div>
+              <a className="sl-link" href={pdf.pdf_url} target="_blank" rel="noreferrer">
+                ↗ Open summary.pdf <span className="meta">expires 60m</span>
+              </a>
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="sl-panel">
+        <div className="sl-panel-head"><h2>CSV export</h2><span className="desc">GET · /orders/export</span></div>
+        <div className="sl-report-card">
+          <h3>Full orders table</h3>
+          <p>UTF-8 CSV with header row — IDs, descriptions, prices, timestamps. Import directly into Excel or Sheets.</p>
+          <button className="sl-btn primary" style={{marginTop:14}} disabled={busy === 'csv'} onClick={async () => {
+            setBusy('csv');
+            try { const d = await store.exportCSV(); setCsv(d); showToast(`CSV · ${d.total_orders} rows`); }
+            catch(e) { showToast(e.message, 'err'); }
+            finally { setBusy(null); }
+          }}>{busy === 'csv' ? 'Exporting…' : 'Export CSV'}</button>
+          {csv && (
+            <div>
+              <a className="sl-link" href={csv.csv_url} target="_blank" rel="noreferrer">
+                ↗ {csv.filename || 'orders.csv'} <span className="meta">{csv.total_orders} rows · 60m</span>
+              </a>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Edit Modal ───────────────────────────────────────────────────────────────
+function EditModal({ order, onClose, onSave }) {
+  const [desc, setDesc]   = useState(order.description || '');
+  const [price, setPrice] = useState(order.price || '');
+  const [busy, setBusy]   = useState(false);
+  return (
+    <div className="sl-modal-bg" onClick={onClose}>
+      <div className="sl-modal" onClick={e => e.stopPropagation()}>
+        <div className="sl-modal-head">
+          <h3>Edit order</h3>
+          <div className="sub">{order.order_id}</div>
+        </div>
+        <div className="sl-form">
+          <div className="sl-field"><label>Description</label><input value={desc} onChange={e => setDesc(e.target.value)} /></div>
+          <div className="sl-field"><label>Price · USD</label><input type="number" step="0.01" value={price} onChange={e => setPrice(e.target.value)} /></div>
+        </div>
+        <div className="sl-modal-foot">
+          <button className="sl-btn ghost" onClick={onClose}>Cancel</button>
+          <button className="sl-btn primary" disabled={busy} onClick={async () => {
+            if (!desc.trim() || !price) return;
+            setBusy(true); await onSave({ description: desc.trim(), price }); setBusy(false);
+          }}>{busy ? 'Saving…' : 'Save changes'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Mount ────────────────────────────────────────────────────────────────────
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
