@@ -104,7 +104,7 @@ Final_Project/
 
 ## API Reference
 
-Base URL: `https://dapejgoi60.execute-api.us-east-1.amazonaws.com/prod`
+Base URL: `<your-api-id>.execute-api.<region>.amazonaws.com/prod`
 
 ### Orders
 
